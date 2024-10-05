@@ -18,7 +18,6 @@ clean:
 .PHONY: generate
 generate:
 	buf generate
-	go generate ./...
 
 .PHONY: lint
 lint:

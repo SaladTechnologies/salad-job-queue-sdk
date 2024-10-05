@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/cloudflare/backoff"
-	metadata_api "github.com/saladtechnologies/salad-cloud-job-queue-worker/internal/apis/metadata"
+	"github.com/saladtechnologies/salad-cloud-imds-sdk-go/pkg/saladcloudimdssdk"
 	queues_api "github.com/saladtechnologies/salad-cloud-job-queue-worker/internal/apis/queues"
 	"github.com/saladtechnologies/salad-cloud-job-queue-worker/pkg/config"
 	"github.com/saladtechnologies/salad-cloud-job-queue-worker/pkg/jobs"
@@ -30,11 +30,7 @@ func Run(ctx context.Context, config config.Config, executor jobs.HTTPJobExecuto
 	workerCtx, cancelWorker := context.WithCancel(ctx)
 	defer cancelWorker()
 
-	client, err := newMetadataClient(workerCtx, config.MetadataURI)
-	if err != nil {
-		return err
-	}
-
+	client := newMetadataClient(config.MetadataURI)
 	conn, err := newQueueConnection(workerCtx, config.ServiceEndpoint, config.ServiceUseTLS, version)
 	if err != nil {
 		return err
@@ -177,12 +173,12 @@ func Run(ctx context.Context, config config.Config, executor jobs.HTTPJobExecuto
 
 // Represents a long-running goroutine that polls for readiness changes.
 type readinessPoller struct {
-	client    metadata_api.ClientWithResponsesInterface
+	client    *saladcloudimdssdk.SaladCloudImdsSdk
 	readiness chan bool
 }
 
 // Creates a new readiness poller.
-func newReadinessPoller(client metadata_api.ClientWithResponsesInterface) *readinessPoller {
+func newReadinessPoller(client *saladcloudimdssdk.SaladCloudImdsSdk) *readinessPoller {
 	return &readinessPoller{
 		client:    client,
 		readiness: make(chan bool),
@@ -208,7 +204,7 @@ func (p *readinessPoller) poll(ctx context.Context) error {
 		// invalid responses, 429's, and 5xx's (except 501's) using a short,
 		// exponential backoff algorithm. Eventually, it will give up and return
 		// the last error.
-		resp, err := p.client.GetStatusWithResponse(ctx)
+		resp, err := p.client.Metadata.GetContainerStatus(ctx)
 		retryDelay := 2 * time.Minute // Default retry delay for errors.
 		if err != nil {
 			failures++
@@ -216,16 +212,17 @@ func (p *readinessPoller) poll(ctx context.Context) error {
 		}
 
 		if resp != nil {
-			switch resp.StatusCode() {
+			switch resp.Metadata.StatusCode {
 			case http.StatusOK:
-				if resp.JSON200 != nil {
+				if resp.Data.GetReady() != nil {
 					failures = 0
-					logger.Debug("fetched workload instance status", "status", resp.JSON200.Ready)
+					ready := *resp.Data.GetReady()
+					logger.Debug("fetched workload instance status", "status", ready)
 					retryDelay = 5 * time.Second // Retry delay for successes.
 					select {
 					case <-ctx.Done():
 						return ctx.Err()
-					case p.readiness <- resp.JSON200.Ready:
+					case p.readiness <- ready:
 					}
 				} else {
 					failures++
@@ -241,7 +238,7 @@ func (p *readinessPoller) poll(ctx context.Context) error {
 				return workloadInstanceNotFound
 			default:
 				failures++
-				logger.Error("failed to fetch workload instance status", "status", resp.Status())
+				logger.Error("failed to fetch workload instance status", "status", resp.Metadata.StatusCode)
 			}
 		}
 
@@ -265,14 +262,14 @@ func (p *readinessPoller) poll(ctx context.Context) error {
 
 // Represents a long-running goroutine that polls for jobs.
 type jobPoller struct {
-	client     metadata_api.ClientWithResponsesInterface
+	client     *saladcloudimdssdk.SaladCloudImdsSdk
 	conn       *grpc.ClientConn
 	currentJob *atomic.Pointer[queues_api.Job]
 	jobs       chan *queues_api.Job
 }
 
 // Creates a new job poller.
-func newJobPoller(client metadata_api.ClientWithResponsesInterface, conn *grpc.ClientConn, currentJob *atomic.Pointer[queues_api.Job]) *jobPoller {
+func newJobPoller(client *saladcloudimdssdk.SaladCloudImdsSdk, conn *grpc.ClientConn, currentJob *atomic.Pointer[queues_api.Job]) *jobPoller {
 	return &jobPoller{
 		client:     client,
 		conn:       conn,
@@ -300,25 +297,25 @@ func (p *jobPoller) poll(ctx context.Context) error {
 		// invalid responses, 429's, and 5xx's (except 501's) using a short,
 		// exponential backoff algorithm. Eventually, it will give up and return
 		// the last error.
-		resp, err := p.client.GetTokenWithResponse(ctx)
+		resp, err := p.client.Metadata.GetContainerToken(ctx)
 		if err != nil {
 			logger.Error("failed to fetch workload instance token", "error", err)
 		}
 
 		var token string
 		if resp != nil {
-			switch resp.StatusCode() {
+			switch resp.Metadata.StatusCode {
 			case http.StatusOK:
-				if resp.JSON200 != nil && resp.JSON200.Jwt != "" {
-					logger.Debug("fetched workload instance token", "token", resp.JSON200.Jwt)
-					token = resp.JSON200.Jwt
+				if resp.Data.GetJwt() != nil {
+					token = *resp.Data.GetJwt()
+					logger.Debug("fetched workload instance token", "token", token)
 				} else {
 					logger.Error("failed to receive JSON response body fetching workload instance token")
 				}
 			case http.StatusNotFound:
 				return workloadInstanceNotFound
 			default:
-				logger.Error("failed to fetch workload instance token", "status", resp.Status())
+				logger.Error("failed to fetch workload instance token", "status", resp.Metadata.StatusCode)
 			}
 		}
 
@@ -450,7 +447,7 @@ func (p *jobPoller) poll(ctx context.Context) error {
 
 // Represents a long-running goroutine that executes a job and uploads the result.
 type jobHandler struct {
-	client   metadata_api.ClientWithResponsesInterface
+	client   *saladcloudimdssdk.SaladCloudImdsSdk
 	conn     *grpc.ClientConn
 	d        chan struct{}
 	executor jobs.HTTPJobExecutor
@@ -458,7 +455,7 @@ type jobHandler struct {
 }
 
 // Creates a new job handler.
-func newJobHandler(client metadata_api.ClientWithResponsesInterface, conn *grpc.ClientConn, job jobs.HTTPJob, executor jobs.HTTPJobExecutor) *jobHandler {
+func newJobHandler(client *saladcloudimdssdk.SaladCloudImdsSdk, conn *grpc.ClientConn, job jobs.HTTPJob, executor jobs.HTTPJobExecutor) *jobHandler {
 	return &jobHandler{
 		client:   client,
 		conn:     conn,
@@ -503,25 +500,25 @@ func (h *jobHandler) complete(ctx context.Context, responseBody []byte) error {
 		// invalid responses, 429's, and 5xx's (except 501's) using a short,
 		// exponential backoff algorithm. Eventually, it will give up and return
 		// the last error.
-		resp, err := h.client.GetTokenWithResponse(ctx)
+		resp, err := h.client.Metadata.GetContainerToken(ctx)
 		if err != nil {
 			logger.Error("failed to fetch workload instance token", "error", err)
 		}
 
 		var token string
 		if resp != nil {
-			switch resp.StatusCode() {
+			switch resp.Metadata.StatusCode {
 			case http.StatusOK:
-				if resp.JSON200 != nil && resp.JSON200.Jwt != "" {
-					logger.Debug("fetched workload instance token", "token", resp.JSON200.Jwt)
-					token = resp.JSON200.Jwt
+				if resp.Data.GetJwt() != nil {
+					token = *resp.Data.GetJwt()
+					logger.Debug("fetched workload instance token", "token", token)
 				} else {
 					logger.Error("failed to receive JSON response body fetching workload instance token")
 				}
 			case http.StatusNotFound:
 				return workloadInstanceNotFound
 			default:
-				logger.Error("failed to fetch workload instance token", "status", resp.Status())
+				logger.Error("failed to fetch workload instance token", "status", resp.Metadata.StatusCode)
 			}
 		}
 
@@ -616,25 +613,25 @@ func (h *jobHandler) reject(ctx context.Context) error {
 		// invalid responses, 429's, and 5xx's (except 501's) using a short,
 		// exponential backoff algorithm. Eventually, it will give up and return
 		// the last error.
-		resp, err := h.client.GetTokenWithResponse(ctx)
+		resp, err := h.client.Metadata.GetContainerToken(ctx)
 		if err != nil {
 			logger.Error("failed to fetch workload instance token", "error", err)
 		}
 
 		var token string
 		if resp != nil {
-			switch resp.StatusCode() {
+			switch resp.Metadata.StatusCode {
 			case http.StatusOK:
-				if resp.JSON200 != nil && resp.JSON200.Jwt != "" {
-					logger.Debug("fetched workload instance token", "token", resp.JSON200.Jwt)
-					token = resp.JSON200.Jwt
+				if resp.Data.GetJwt() != nil {
+					token = *resp.Data.GetJwt()
+					logger.Debug("fetched workload instance token", "token", token)
 				} else {
 					logger.Error("failed to receive JSON response body fetching workload instance token")
 				}
 			case http.StatusNotFound:
 				return workloadInstanceNotFound
 			default:
-				logger.Error("failed to fetch workload instance token", "status", resp.Status())
+				logger.Error("failed to fetch workload instance token", "status", resp.Metadata.StatusCode)
 			}
 		}
 

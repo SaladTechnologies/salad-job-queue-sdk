@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.12.3-slim-bookworm
+FROM python:3.12.7-slim-bookworm
 
 EXPOSE 80/tcp
 
