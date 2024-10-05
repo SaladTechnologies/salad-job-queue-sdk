@@ -7,7 +7,7 @@ toolchain go1.23.2
 require (
 	github.com/caarlos0/env/v11 v11.2.2
 	github.com/cloudflare/backoff v0.0.0-20240920015135-e46b80a3a7d0
-	github.com/saladtechnologies/salad-cloud-imds-sdk-go v0.9.0-alpha.3
+	github.com/saladtechnologies/salad-cloud-imds-sdk-go v0.9.0-alpha.4
 	github.com/testcontainers/testcontainers-go v0.33.0
 	google.golang.org/grpc v1.67.1
 	google.golang.org/protobuf v1.34.2

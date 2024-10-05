@@ -8,4 +8,4 @@ WORKDIR /app
 COPY ./requirements.txt *.py ./
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
-CMD ["uvicorn", "main:app", "--host", "*", "--port", "80"]
+CMD ["fastapi", "run", "/app/main.py", "--host", "*", "--port", "80"]
