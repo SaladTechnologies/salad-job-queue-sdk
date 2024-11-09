@@ -4,12 +4,12 @@ FROM mandelbrot:latest
 
 WORKDIR /app
 
-ARG SALAD_JOB_QUEUE_WORKER_VERSION=0.4.0
+ARG SALAD_JOB_QUEUE_WORKER_VERSION=0.4.1
 RUN apt-get update && \
     apt-get -y install curl && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
-ADD https://github.com/SaladTechnologies/salad-cloud-job-queue-worker/releases/download/${SALAD_JOB_QUEUE_WORKER_VERSION}/salad-http-job-queue-worker_x86_64.tar.gz /tmp
+ADD https://github.com/SaladTechnologies/salad-cloud-job-queue-worker/releases/download/v${SALAD_JOB_QUEUE_WORKER_VERSION}/salad-http-job-queue-worker_x86_64.tar.gz /tmp
 RUN tar -C /usr/local/bin -zxpf /tmp/salad-http-job-queue-worker_x86_64.tar.gz && \
     rm -rf /tmp/salad-http-job-queue-worker_x86_64.tar.gz
 
